@@ -111,8 +111,8 @@ export default function SavedEstimatesDialog({
       setSaveLabel('')
       setMode('list')
       fetchEstimates()
-    } catch {
-      setError('Failed to save estimate')
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save estimate')
     } finally {
       setSaving(false)
     }
@@ -123,8 +123,8 @@ export default function SavedEstimatesDialog({
     try {
       await onDelete(id)
       setSavedEstimates(prev => prev.filter(e => e.id !== id))
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      console.error('Delete failed:', err)
     } finally {
       setDeletingId(null)
       setDeleteConfirm(null)
@@ -136,8 +136,8 @@ export default function SavedEstimatesDialog({
     try {
       await onLoad(id)
       onOpenChange(false)
-    } catch {
-      setError('Failed to load estimate')
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load estimate')
     } finally {
       setLoading(false)
       setLoadConfirm(null)

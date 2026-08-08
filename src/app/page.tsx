@@ -905,13 +905,16 @@ export default function Home() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientName: clientInfo.name || 'Unnamed', label, data: payload, totalCost: grandTotal }),
     })
-    if (!res.ok) throw new Error('Save failed')
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}))
+      throw new Error(errData?.error || `Server error (${res.status})`)
+    }
     setHasUnsavedChanges(false)
   }
 
   const handleLoadEstimate = async (id: string) => {
     const res = await fetch(`/api/estimates/saved/${id}`)
-    if (!res.ok) throw new Error('Load failed')
+    if (!res.ok) throw new Error('Failed to load estimate')
     const { data } = await res.json()
     if (data.clientInfo) setClientInfo(data.clientInfo)
     if (data.kitchenType) setKitchenType(data.kitchenType)
