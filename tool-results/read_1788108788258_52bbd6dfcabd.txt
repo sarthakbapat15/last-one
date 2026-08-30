@@ -1,0 +1,1084 @@
+     1→import { NextRequest, NextResponse } from 'next/server'
+     2→import { Workbook } from 'exceljs'
+     3→import fs from 'fs'
+     4→import path from 'path'
+     5→
+     6→interface EstimateData {
+     7→  clientInfo: {
+     8→    name: string
+     9→    address: string
+    10→    contact: string
+    11→    serviceType: string
+    12→  }
+    13→  kitchenType: string
+    14→  totalCost: number
+    15→  kitchenCost: number
+    16→  livingRoomCost: number
+    17→  components: Record<string, any>
+    18→  livingRoomEstimate?: Record<string, any>
+    19→  logoSettings?: {
+    20→    width: number
+    21→    height: number
+    22→    position: 'left' | 'center' | 'right'
+    23→  }
+    24→  miscEstimate?: {
+    25→    falseCeiling: { type: string; material: string; height: string; width: string }
+    26→    electricalWork: Array<{ id?: string; lightPointType: string; quantity: string }>
+    27→    painting: Array<{ id?: string; paintType: string; totalArea: string }>
+    28→  }
+    29→  discountPercent?: number
+    30→}
+    31→
+    32→function validateData(body: any): EstimateData {
+    33→  return {
+    34→    clientInfo: {
+    35→      name: body?.clientInfo?.name || '',
+    36→      address: body?.clientInfo?.address || '',
+    37→      contact: body?.clientInfo?.contact || '',
+    38→      serviceType: body?.clientInfo?.serviceType || ''
+    39→    },
+    40→    kitchenType: body?.kitchenType || '',
+    41→    totalCost: body?.totalCost || 0,
+    42→    kitchenCost: body?.kitchenCost || 0,
+    43→    livingRoomCost: body?.livingRoomCost || 0,
+    44→    components: body?.components || {},
+    45→    livingRoomEstimate: body?.livingRoomEstimate || undefined,
+    46→    logoSettings: body?.logoSettings || { width: 350, height: 140, position: 'center' },
+    47→    miscEstimate: body?.miscEstimate || undefined,
+    48→    discountPercent: body?.discountPercent || 0,
+    49→  }
+    50→}
+    51→
+    52→// Price constants (mirrored from frontend)
+    53→const PRICES = {
+    54→  tandemDrawers: { Olive: 8000, Blum: 12000, Hettich: 12000 },
+    55→  dustbinBTD: { Olive: 7500, Blum: 7500, Hettich: 7500 },
+    56→  bottlePullout: { Olive: 8000, Blum: 8000, Hettich: 8000 },
+    57→  wickerBasket: { Olive: 7500, Hettich: 7500 },
+    58→  plyVerticals: 1500,
+    59→  overheadLoft: { 'Frame Loft': 1150, 'Box Loft': 1250 },
+    60→  overheadFinish: { Acrylic: 1850, Laminate: 1200, UV: 1400, PU: 1600 },
+    61→  tallPantryFinish: { SF: 1450, HGL: 1550, Acrylic: 1850, 'Glass Acrylic': 2150 },
+    62→  pantryAccessories: { Pullout: 21000, 'Openable (6+6 basket)': 40000 },
+    63→  livingRoomFinish: { SF: 1250, HGL: 1350, Acrylic: 1550, 'Veneer with polish': 1750 },
+    64→  livingRoomTallUnitFinish: { SF: 1250, HGL: 1350, Acrylic: 1850, 'Veneer with polish': 1750 },
+    65→  backPanelFinish: { HGL: 650, SF: 550, Acrylic: 1175, Veneer: 950 },
+    66→  ledgeShelf: 350,
+    67→  flutedPanel: 900,
+    68→  sittingWithCushion: 1350,
+    69→  profileShutter: 350,
+    70→  vanityClosing: {
+    71→    Frame: { SF: 1300, Gloss: 1400 },
+    72→    Carcase: { SF: 1800, Gloss: 1900 },
+    73→  },
+    74→  countertopMaterial: { Granite: 550, Quartz: 650 },
+    75→  baseCarcase: 1650,
+    76→  kitchenPaneling: { SF: 800, 'Gloss (MR+)': 1150, HGL: 1350, Acrylic: 1450 },
+    77→  overheadCabinetFinish: { SF: 1550, HGL: 2150, Acrylic: 2650, 'Glass Acrylic': 2850 },
+    78→  tallUnitFinishByDepth: {
+    79→    '450mm': { SF: 2100, HGL: 2450, 'MR+': 2350, Acrylic: 2900 },
+    80→    '600mm': { SF: 2125, 'MR+': 2375, HGL: 2500, Acrylic: 2950 },
+    81→  },
+    82→  overheadBoxLoftFinish: {
+    83→    '450mm': { SF: 1625, HGL: 1875 },
+    84→    '600mm': { SF: 1650, HGL: 2050 },
+    85→  },
+    86→  overheadFinish: { SF: 1125, HGL: 1450, Acrylic: 1850, Laminate: 1200, PU: 1600 },
+    87→}
+    88→
+    89→const calculateSqft = (height: string, width: string): number => {
+    90→  const h = parseFloat(height) || 0
+    91→  const w = parseFloat(width) || 0
+    92→  return (h * w) / 92903
+    93→}
+    94→
+    95→interface ExportItem {
+    96→  label: string
+    97→  subLabel?: string
+    98→  l?: number
+    99→  b?: number
+   100→  sqft?: number
+   101→  quantity?: number
+   102→  totalSqft?: number
+   103→  rate?: number
+   104→  amount: number
+   105→}
+   106→
+   107→function getKitchenItems(components: any, kitchenType: string): ExportItem[] {
+   108→  const items: ExportItem[] = []
+   109→
+   110→  // Component 1: Ply Verticals or Structure/Countertop
+   111→  const c1 = components.component1 || {}
+   112→  if (kitchenType === 'Semi-Modular') {
+   113→    const qty = parseFloat(c1.quantity) || 0
+   114→    if (qty > 0) {
+   115→      items.push({
+   116→        label: 'Ply Verticals',
+   117→        subLabel: 'CARCASE',
+   118→        quantity: qty,
+   119→        totalSqft: qty,
+   120→        rate: PRICES.plyVerticals,
+   121→        amount: qty * PRICES.plyVerticals
+   122→      })
+   123→    }
+   124→  } else {
+   125→    const sqft = calculateSqft(c1.height, c1.width)
+   126→    const basePrice = PRICES.countertopMaterial[c1.material as keyof typeof PRICES.countertopMaterial] || PRICES.countertopMaterial.Granite
+   127→    if (sqft > 0 && c1.height && c1.width) {
+   128→      items.push({
+   129→        label: 'Structure / Countertop',
+   130→        subLabel: c1.material || 'Granite',
+   131→        l: parseFloat(c1.height) || 0,
+   132→        b: parseFloat(c1.width) || 0,
+   133→        sqft,
+   134→        quantity: 1,
+   135→        totalSqft: sqft,
+   136→        rate: basePrice,
+   137→        amount: sqft * basePrice
+   138→      })
+   139→    }
+   140→  }
+   141→
+   142→  // Tandem Drawers
+   143→  const td = components.tandemDrawers || {}
+   144→  if (td.brand && PRICES.tandemDrawers[td.brand as keyof typeof PRICES.tandemDrawers]) {
+   145→    const qty = parseFloat(td.quantity) || 0
+   146→    const price = PRICES.tandemDrawers[td.brand as keyof typeof PRICES.tandemDrawers]
+   147→    if (qty > 0) {
+   148→      items.push({
+   149→        label: 'Tandem Drawers',
+   150→        subLabel: td.brand,
+   151→        quantity: qty,
+   152→        totalSqft: qty,
+   153→        rate: price,
+   154→        amount: qty * price
+   155→      })
+   156→    }
+   157→  }
+   158→
+   159→  // Dustbin + BTD
+   160→  const db = components.dustbinBTD || {}
+   161→  if (db.brand && PRICES.dustbinBTD[db.brand as keyof typeof PRICES.dustbinBTD]) {
+   162→    const qty = parseFloat(db.quantity) || 0
+   163→    const price = PRICES.dustbinBTD[db.brand as keyof typeof PRICES.dustbinBTD]
+   164→    if (qty > 0) {
+   165→      items.push({
+   166→        label: 'Dustbin + BTD',
+   167→        subLabel: db.brand,
+   168→        quantity: qty,
+   169→        totalSqft: qty,
+   170→        rate: price,
+   171→        amount: qty * price
+   172→      })
+   173→    }
+   174→  }
+   175→
+   176→  // Bottle Pullout
+   177→  const bp = components.bottlePullout || {}
+   178→  if (bp.brand && PRICES.bottlePullout[bp.brand as keyof typeof PRICES.bottlePullout]) {
+   179→    const qty = parseFloat(bp.quantity) || 0
+   180→    const price = PRICES.bottlePullout[bp.brand as keyof typeof PRICES.bottlePullout]
+   181→    if (qty > 0) {
+   182→      items.push({
+   183→        label: 'Bottle Pullout',
+   184→        subLabel: bp.brand,
+   185→        quantity: qty,
+   186→        totalSqft: qty,
+   187→        rate: price,
+   188→        amount: qty * price
+   189→      })
+   190→    }
+   191→  }
+   192→
+   193→  // Wicker Basket
+   194→  const wb = components.wickerBasket || {}
+   195→  if (wb.brand && PRICES.wickerBasket[wb.brand as keyof typeof PRICES.wickerBasket]) {
+   196→    const qty = parseFloat(wb.quantity) || 0
+   197→    const price = PRICES.wickerBasket[wb.brand as keyof typeof PRICES.wickerBasket]
+   198→    if (qty > 0) {
+   199→      items.push({
+   200→        label: 'Wicker Baskets',
+   201→        subLabel: wb.brand,
+   202→        quantity: qty,
+   203→        totalSqft: qty,
+   204→        rate: price,
+   205→        amount: qty * price
+   206→      })
+   207→    }
+   208→  }
+   209→
+   210→  // Tall Unit
+   211→  const tu = components.tallUnit || {}
+   212→  if (tu.height && tu.width && tu.tallPantryFinish) {
+   213→    const sqft = calculateSqft(tu.height, tu.width)
+   214→    const depth = (tu.depth || '450mm') as '450mm' | '600mm'
+   215→    let rate = 0
+   216→    if (tu.tallPantryFinish === 'Postforming') {
+   217→      rate = validatedData.components?.postformingRate ? parseFloat(validatedData.components.postformingRate) : 0
+   218→    } else {
+   219→      const depthPrices = PRICES.tallUnitFinishByDepth[depth]
+   220→      rate = depthPrices?.[tu.tallPantryFinish as keyof typeof depthPrices] || 0
+   221→    }
+   222→    if (sqft > 0 && rate > 0) {
+   223→      items.push({
+   224→        label: 'Tall Unit',
+   225→        subLabel: `${depth} ${tu.tallPantryFinish}`,
+   226→        l: parseFloat(tu.height) || 0,
+   227→        b: parseFloat(tu.width) || 0,
+   228→        sqft,
+   229→        quantity: 1,
+   230→        totalSqft: sqft,
+   231→        rate,
+   232→        amount: sqft * rate
+   233→      })
+   234→    }
+   235→  }
+   236→
+   237→  // Pantry Unit
+   238→  const pu = components.pantryUnit || {}
+   239→  if (pu.height && pu.width && pu.tallPantryFinish) {
+   240→    const sqft = calculateSqft(pu.height, pu.width)
+   241→    const finishRate = PRICES.tallPantryFinish[pu.tallPantryFinish as keyof typeof PRICES.tallPantryFinish] || 0
+   242→    let amount = sqft * finishRate
+   243→    const accType = pu.accessories as string
+   244→    const accPrice = accType ? PRICES.pantryAccessories[accType as keyof typeof PRICES.pantryAccessories] : 0
+   245→    amount += accPrice || 0
+   246→    if (sqft > 0 && (finishRate > 0 || accPrice > 0)) {
+   247→      items.push({
+   248→        label: 'Pantry Unit',
+   249→        subLabel: `Carcass ${pu.tallPantryFinish}`,
+   250→        l: parseFloat(pu.height) || 0,
+   251→        b: parseFloat(pu.width) || 0,
+   252→        sqft,
+   253→        quantity: 1,
+   254→        totalSqft: sqft,
+   255→        rate: finishRate,
+   256→        amount
+   257→      })
+   258→      if (accPrice > 0) {
+   259→        items.push({
+   260→          label: '',
+   261→          subLabel: accType,
+   262→          quantity: 1,
+   263→          totalSqft: 1,
+   264→          rate: accPrice,
+   265→          amount: accPrice
+   266→        })
+   267→      }
+   268→    }
+   269→  }
+   270→
+   271→  // Base Carcase
+   272→  const bcc = components.baseCarcase || {}
+   273→  if (bcc.height && bcc.width) {
+   274→    const sqft = calculateSqft(bcc.height, bcc.width)
+   275→    if (sqft > 0) {
+   276→      items.push({
+   277→        label: 'Base Carcase',
+   278→        subLabel: 'CARCASE',
+   279→        l: parseFloat(bcc.height) || 0,
+   280→        b: parseFloat(bcc.width) || 0,
+   281→        sqft,
+   282→        quantity: 1,
+   283→        totalSqft: sqft,
+   284→        rate: PRICES.baseCarcase,
+   285→        amount: sqft * PRICES.baseCarcase
+   286→      })
+   287→    }
+   288→  }
+   289→
+   290→  // Kitchen Paneling
+   291→  const kp = components.kitchenPaneling || {}
+   292→  if (kp.height && kp.width && kp.tallPantryFinish) {
+   293→    const sqft = calculateSqft(kp.height, kp.width)
+   294→    const kpRate = kp.tallPantryFinish === 'Postforming'
+   295→      ? (validatedData.components.postformingRate ? parseFloat(validatedData.components.postformingRate) : 0)
+   296→      : (PRICES.kitchenPaneling[kp.tallPantryFinish as keyof typeof PRICES.kitchenPaneling] || 0)
+   297→    if (sqft > 0 && kpRate > 0) {
+   298→      items.push({
+   299→        label: 'Kitchen Paneling',
+   300→        subLabel: kp.tallPantryFinish,
+   301→        l: parseFloat(kp.height) || 0,
+   302→        b: parseFloat(kp.width) || 0,
+   303→        sqft,
+   304→        quantity: 1,
+   305→        totalSqft: sqft,
+   306→        rate: kpRate,
+   307→        amount: sqft * kpRate
+   308→      })
+   309→    }
+   310→  }
+   311→
+   312→  // Overhead Cabinet
+   313→  const ohc = components.overheadCabinet || {}
+   314→  if (ohc.height && ohc.width && ohc.overheadCabinetFinish) {
+   315→    const sqft = calculateSqft(ohc.height, ohc.width)
+   316→    const ohcRate = PRICES.overheadCabinetFinish[ohc.overheadCabinetFinish as keyof typeof PRICES.overheadCabinetFinish] || 0
+   317→    if (sqft > 0 && ohcRate > 0) {
+   318→      items.push({
+   319→        label: 'Overhead Cabinet',
+   320→        subLabel: ohc.overheadCabinetFinish,
+   321→        l: parseFloat(ohc.height) || 0,
+   322→        b: parseFloat(ohc.width) || 0,
+   323→        sqft,
+   324→        quantity: 1,
+   325→        totalSqft: sqft,
+   326→        rate: ohcRate,
+   327→        amount: sqft * ohcRate
+   328→      })
+   329→    }
+   330→  }
+   331→
+   332→  // Overhead Loft
+   333→  const ol = components.overheadLoft || {}
+   334→  if (ol.height && ol.width && ol.loftType) {
+   335→    const sqft = calculateSqft(ol.height, ol.width)
+   336→    let rate = 0
+   337→    let subLabel = ''
+   338→    if (ol.loftType === 'Box Loft') {
+   339→      const depth = (ol.depth || '450mm') as '450mm' | '600mm'
+   340→      if (ol.finish === 'Postforming') {
+   341→        rate = validatedData.components?.postformingRate ? parseFloat(validatedData.components.postformingRate) : 0
+   342→      } else {
+   343→        const boxPrices = PRICES.overheadBoxLoftFinish[depth]
+   344→        rate = boxPrices?.[ol.finish as keyof typeof boxPrices] || 0
+   345→      }
+   346→      subLabel = `${ol.loftType} ${depth} ${ol.finish || ''}`
+   347→    } else {
+   348→      const basePrice = PRICES.overheadLoft[ol.loftType as keyof typeof PRICES.overheadLoft] || 0
+   349→      const finishPrice = ol.finish === 'Postforming'
+   350→        ? (validatedData.components?.postformingRate ? parseFloat(validatedData.components.postformingRate) : 0)
+   351→        : (PRICES.overheadFinish[ol.finish as keyof typeof PRICES.overheadFinish] || 0)
+   352→      rate = basePrice + finishPrice
+   353→      subLabel = `Carcass ${ol.loftType}`
+   354→    }
+   355→    if (sqft > 0 && rate > 0) {
+   356→      items.push({
+   357→        label: 'Overhead Loft',
+   358→        subLabel,
+   359→        l: parseFloat(ol.height) || 0,
+   360→        b: parseFloat(ol.width) || 0,
+   361→        sqft,
+   362→        quantity: 1,
+   363→        totalSqft: sqft,
+   364→        rate,
+   365→        amount: sqft * rate
+   366→      })
+   367→    }
+   368→  }
+   369→
+   370→  // Profile Shutter
+   371→  const ps = components.profileShutter || {}
+   372→  const psQty = parseFloat(ps.quantity) || 0
+   373→  const psPrice = parseFloat(ps.price) || PRICES.profileShutter
+   374→  if (psQty > 0) {
+   375→    items.push({
+   376→      label: 'Profile Shutter with Glass',
+   377→      quantity: psQty,
+   378→      totalSqft: psQty,
+   379→      rate: psPrice,
+   380→      amount: psQty * psPrice
+   381→    })
+   382→  }
+   383→
+   384→  // Vanity Closing
+   385→  const vc = components.vanityClosing || {}
+   386→  const vcType = vc.material as 'Frame' | 'Carcase' | undefined
+   387→  const vcFinish = vc.tallPantryFinish as 'SF' | 'Gloss' | undefined
+   388→  if (vcType && vcFinish && PRICES.vanityClosing[vcType]) {
+   389→    const vcRate = PRICES.vanityClosing[vcType][vcFinish] || 0
+   390→    const vcSqft = calculateSqft(vc.height, vc.width)
+   391→    if (vcSqft > 0 && vcRate > 0) {
+   392→      items.push({
+   393→        label: 'Vanity Closing',
+   394→        subLabel: `${vcType} — ${vcFinish}`,
+   395→        l: parseFloat(vc.height) || 0,
+   396→        b: parseFloat(vc.width) || 0,
+   397→        sqft: Math.round(vcSqft),
+   398→        quantity: 1,
+   399→        totalSqft: Math.round(vcSqft),
+   400→        rate: vcRate,
+   401→        amount: vcSqft * vcRate
+   402→      })
+   403→    }
+   404→  }
+   405→
+   406→  // Handles
+   407→  const hd = components.handles || {}
+   408→  const handleFeet = parseFloat(hd.runningFeet) || 0
+   409→  const handlePrice = parseFloat(hd.handlePrice) || 0
+   410→  if (handleFeet > 0 && handlePrice > 0) {
+   411→    items.push({
+   412→      label: 'Handles',
+   413→      subLabel: hd.handleType,
+   414→      quantity: handleFeet,
+   415→      totalSqft: handleFeet,
+   416→      rate: handlePrice,
+   417→      amount: handleFeet * handlePrice
+   418→    })
+   419→  }
+   420→
+   421→  return items
+   422→}
+   423→
+   424→function getLivingRoomItems(livingRoomEstimate: any): ExportItem[] {
+   425→  const items: ExportItem[] = []
+   426→  if (!livingRoomEstimate || !livingRoomEstimate.components) return items
+   427→
+   428→  const comps = livingRoomEstimate.components
+   429→
+   430→  // Chest of Drawers
+   431→  const cod = comps.chestOfDrawers || {}
+   432→  if (cod.height && cod.width && cod.tallPantryFinish) {
+   433→    const sqft = calculateSqft(cod.height, cod.width)
+   434→    const rate = PRICES.livingRoomFinish[cod.tallPantryFinish as keyof typeof PRICES.livingRoomFinish] || 0
+   435→    if (sqft > 0 && rate > 0) {
+   436→      items.push({
+   437→        label: 'Chest of Drawers',
+   438→        subLabel: `Carcass ${cod.tallPantryFinish}`,
+   439→        l: parseFloat(cod.height) || 0,
+   440→        b: parseFloat(cod.width) || 0,
+   441→        sqft,
+   442→        quantity: 1,
+   443→        totalSqft: sqft,
+   444→        rate,
+   445→        amount: sqft * rate
+   446→      })
+   447→    }
+   448→  }
+   449→
+   450→  // Base Cabinet
+   451→  const bc = comps.baseCabinet || {}
+   452→  if (bc.height && bc.width && bc.tallPantryFinish) {
+   453→    const sqft = calculateSqft(bc.height, bc.width)
+   454→    const rate = PRICES.livingRoomFinish[bc.tallPantryFinish as keyof typeof PRICES.livingRoomFinish] || 0
+   455→    if (sqft > 0 && rate > 0) {
+   456→      items.push({
+   457→        label: 'Base Cabinet with shutters',
+   458→        subLabel: `Carcass ${bc.tallPantryFinish}`,
+   459→        l: parseFloat(bc.height) || 0,
+   460→        b: parseFloat(bc.width) || 0,
+   461→        sqft,
+   462→        quantity: 1,
+   463→        totalSqft: sqft,
+   464→        rate,
+   465→        amount: sqft * rate
+   466→      })
+   467→    }
+   468→  }
+   469→
+   470→  // Tall Unit
+   471→  const ltu = comps.livingRoomTallUnit || {}
+   472→  if (ltu.height && ltu.width && ltu.tallPantryFinish) {
+   473→    const sqft = calculateSqft(ltu.height, ltu.width)
+   474→    const rate = PRICES.livingRoomTallUnitFinish[ltu.tallPantryFinish as keyof typeof PRICES.livingRoomTallUnitFinish] || 0
+   475→    if (sqft > 0 && rate > 0) {
+   476→      items.push({
+   477→        label: 'Tall Unit',
+   478→        subLabel: `Carcass ${ltu.tallPantryFinish}`,
+   479→        l: parseFloat(ltu.height) || 0,
+   480→        b: parseFloat(ltu.width) || 0,
+   481→        sqft,
+   482→        quantity: 1,
+   483→        totalSqft: sqft,
+   484→        rate,
+   485→        amount: sqft * rate
+   486→      })
+   487→    }
+   488→  }
+   489→
+   490→  // Back Panel
+   491→  const bp = comps.backPanel || {}
+   492→  if (bp.height && bp.width && bp.loftType) {
+   493→    const sqft = calculateSqft(bp.height, bp.width)
+   494→    const rate = PRICES.backPanelFinish[bp.loftType as keyof typeof PRICES.backPanelFinish] || 0
+   495→    if (sqft > 0 && rate > 0) {
+   496→      items.push({
+   497→        label: 'Back Panel',
+   498→        subLabel: bp.loftType,
+   499→        l: parseFloat(bp.height) || 0,
+   500→        b: parseFloat(bp.width) || 0,
+   501→        sqft,
+   502→        quantity: 1,
+   503→        totalSqft: sqft,
+   504→        rate,
+   505→        amount: sqft * rate
+   506→      })
+   507→    }
+   508→  }
+   509→
+   510→  // Ledge/Shelf
+   511→  const ls = comps.ledgeShelf || {}
+   512→  const lsSqft = calculateSqft(ls.height, ls.width)
+   513→  const lsQty = parseFloat(ls.quantity) || 1
+   514→  if (lsSqft > 0) {
+   515→    items.push({
+   516→      label: 'Ledge/Shelf',
+   517→      subLabel: 'Sitting',
+   518→      l: parseFloat(ls.height) || 0,
+   519→      b: parseFloat(ls.width) || 0,
+   520→      sqft: lsSqft,
+   521→      quantity: lsQty,
+   522→      totalSqft: lsSqft * lsQty,
+   523→      rate: PRICES.ledgeShelf,
+   524→      amount: lsSqft * PRICES.ledgeShelf * lsQty
+   525→    })
+   526→  }
+   527→
+   528→  // Fluted Panel
+   529→  const fp = comps.flutedPanel || {}
+   530→  const fpQty = parseFloat(fp.quantity) || 0
+   531→  if (fpQty > 0) {
+   532→    items.push({
+   533→      label: 'Wall Décor',
+   534→      subLabel: 'Fluted Panel',
+   535→      quantity: fpQty,
+   536→      totalSqft: fpQty,
+   537→      rate: PRICES.flutedPanel,
+   538→      amount: fpQty * PRICES.flutedPanel
+   539→    })
+   540→  }
+   541→
+   542→  // Shoe Rack
+   543→  const sr = comps.shoeRack || {}
+   544→  if (sr.height && sr.width && sr.tallPantryFinish) {
+   545→    const sqft = calculateSqft(sr.height, sr.width)
+   546→    const rate = PRICES.livingRoomFinish[sr.tallPantryFinish as keyof typeof PRICES.livingRoomFinish] || 0
+   547→    if (sqft > 0 && rate > 0) {
+   548→      items.push({
+   549→        label: 'Shoe Rack',
+   550→        subLabel: `Carcass ${sr.tallPantryFinish}`,
+   551→        l: parseFloat(sr.height) || 0,
+   552→        b: parseFloat(sr.width) || 0,
+   553→        sqft,
+   554→        quantity: 1,
+   555→        totalSqft: sqft,
+   556→        rate,
+   557→        amount: sqft * rate
+   558→      })
+   559→    }
+   560→  }
+   561→
+   562→  // Sitting with Cushion
+   563→  const swc = comps.sittingWithCushion || {}
+   564→  const swcSqft = calculateSqft(swc.height, swc.width)
+   565→  if (swcSqft > 0) {
+   566→    items.push({
+   567→      label: 'Sitting',
+   568→      subLabel: 'with Cushion',
+   569→      l: parseFloat(swc.height) || 0,
+   570→      b: parseFloat(swc.width) || 0,
+   571→      sqft: swcSqft,
+   572→      quantity: 1,
+   573→      totalSqft: swcSqft,
+   574→      rate: PRICES.sittingWithCushion,
+   575→      amount: swcSqft * PRICES.sittingWithCushion
+   576→    })
+   577→  }
+   578→
+   579→  return items
+   580→}
+   581→
+   582→export async function POST(request: NextRequest) {
+   583→  try {
+   584→    const body = await request.json()
+   585→    const validatedData = validateData(body)
+   586→
+   587→    const workbook = new Workbook()
+   588→
+   589→    // ========================================
+   590→    // SHEET 1: Quotation (olive+HGL format)
+   591→    // ========================================
+   592→    const qs = workbook.addWorksheet('Quotation')
+   593→
+   594→    // Company Header — Logo centered at top (replaces text)
+   595→    const logoPath = path.join(process.cwd(), 'upload', 'pioneer 2.jpg')
+   596→    const lw = validatedData.logoSettings?.width || 350
+   597→    const lh = validatedData.logoSettings?.height || 140
+   598→    const lpos = validatedData.logoSettings?.position || 'center'
+   599→    // Column positions: left=0.1, center=1.5, right=4 (approximate for 8-col sheet)
+   600→    const colPositions: Record<string, number> = { left: 0.1, center: 1.5, right: 4.5 }
+   601→    if (fs.existsSync(logoPath)) {
+   602→      const logoBuffer = fs.readFileSync(logoPath)
+   603→      const logoImageId = workbook.addImage({
+   604→        buffer: logoBuffer,
+   605→        extension: 'jpeg',
+   606→      })
+   607→      qs.addImage(logoImageId, {
+   608→        tl: { col: colPositions[lpos] || 1.5, row: 0 },
+   609→        ext: { width: lw, height: lh },
+   610→      })
+   611→    }
+   612→
+   613→    // Address below logo, centered
+   614→    qs.mergeCells('A3:H3')
+   615→    const c2 = qs.getCell('A3')
+   616→    c2.value = 'GAT. NO.63, PLOT NO. 6/B, A/P SHINDEWADI, TAL. BHOR, DIST. PUNE-412205'
+   617→    c2.font = { size: 10, name: 'Calibri' }
+   618→    c2.alignment = { horizontal: 'center' }
+   619→
+   620→    // Date row - put DATE: label and value separately
+   621→    qs.getCell('E4').value = 'DATE:'
+   622→    qs.getCell('E4').font = { bold: true, name: 'Calibri' }
+   623→    qs.getCell('E4').alignment = { horizontal: 'right' }
+   624→
+   625→    qs.mergeCells('F4:H4')
+   626→    const dateVal = qs.getCell('F4')
+   627→    dateVal.value = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+   628→    dateVal.font = { name: 'Calibri' }
+   629→
+   630→    // To
+   631→    qs.getCell('B6').value = 'To,'
+   632→    qs.getCell('B6').font = { bold: true, name: 'Calibri' }
+   633→
+   634→    // Client name (row 7 area)
+   635→    qs.mergeCells('B7:H7')
+   636→    qs.getCell('B7').value = validatedData.clientInfo.name || ''
+   637→    qs.getCell('B7').font = { bold: true, size: 12, name: 'Calibri' }
+   638→
+   639→    // Empty rows
+   640→    // Row 8-9 empty
+   641→
+   642→    // Subject
+   643→    qs.mergeCells('A10:H10')
+   644→    const subCell = qs.getCell('A10')
+   645→    subCell.value = 'SUB:- Tentative costing For Household Modular Furniture and Accessories at your Residence.'
+   646→    subCell.font = { bold: true, size: 11, name: 'Calibri' }
+   647→
+   648→    // Table Header
+   649→    const headerRow = 12
+   650→    qs.getRow(headerRow).font = { bold: true, name: 'Calibri' }
+   651→    qs.getRow(headerRow).fill = {
+   652→      type: 'pattern',
+   653→      pattern: 'solid',
+   654→      fgColor: { argb: 'FFD3D3D3' }
+   655→    }
+   656→    qs.getCell(`A${headerRow}`).value = 'Sr.No.'
+   657→    qs.getCell(`B${headerRow}`).value = 'Particulars'
+   658→    qs.getCell(`C${headerRow}`).value = 'Qty.'
+   659→    qs.getCell(`D${headerRow}`).value = 'Amount'
+   660→
+   661→    // Collect all items with sections
+   662→    const livingRoomItems = getLivingRoomItems(validatedData.livingRoomEstimate)
+   663→    const kitchenItems = getKitchenItems(validatedData.components, validatedData.kitchenType)
+   664→
+   665→    let rowNum = headerRow + 1
+   666→    let srNo = 1
+   667→    let totalAmount = 0
+   668→
+   669→    // Helper to write a section
+   670→    const writeSection = (sectionName: string, items: ExportItem[]) => {
+   671→      if (items.length === 0) return
+   672→
+   673→      // Section header
+   674→      qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   675→      qs.getCell(`B${rowNum}`).value = sectionName
+   676→      qs.getCell(`B${rowNum}`).font = { bold: true, size: 12, name: 'Calibri' }
+   677→      rowNum++
+   678→
+   679→      items.forEach((item) => {
+   680→        // Sr.No.
+   681→        qs.getCell(`A${rowNum}`).value = `${srNo}]`
+   682→        qs.getCell(`A${rowNum}`).font = { name: 'Calibri' }
+   683→
+   684→        // Particulars
+   685→        if (item.label) {
+   686→          qs.getCell(`B${rowNum}`).value = item.label
+   687→          qs.getCell(`B${rowNum}`).font = { bold: true, name: 'Calibri' }
+   688→        }
+   689→
+   690→        // Qty
+   691→        const qtyText = item.sqft ? String(Math.round(item.sqft)) : (item.quantity ? String(Math.round(item.quantity)) : '1')
+   692→        qs.getCell(`C${rowNum}`).value = qtyText
+   693→        qs.getCell(`C${rowNum}`).alignment = { horizontal: 'center' }
+   694→        qs.getCell(`C${rowNum}`).font = { name: 'Calibri' }
+   695→
+   696→        // Amount
+   697→        if (item.amount > 0) {
+   698→          qs.getCell(`D${rowNum}`).value = Math.round(item.amount)
+   699→          qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   700→          qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   701→          qs.getCell(`D${rowNum}`).font = { name: 'Calibri' }
+   702→          totalAmount += item.amount
+   703→        }
+   704→
+   705→        rowNum++
+   706→
+   707→        // Sub-label row (indented detail)
+   708→        if (item.subLabel) {
+   709→          qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   710→          qs.getCell(`B${rowNum}`).value = item.subLabel
+   711→          qs.getCell(`B${rowNum}`).alignment = { indent: 1 }
+   712→          qs.getCell(`B${rowNum}`).font = { size: 9, name: 'Calibri' }
+   713→          rowNum++
+   714→        }
+   715→
+   716→        // Size detail row
+   717→        if (item.l && item.b) {
+   718→          qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   719→          qs.getCell(`B${rowNum}`).value = `Size: ${item.l}mm x ${item.b}mm`
+   720→          qs.getCell(`B${rowNum}`).alignment = { indent: 1 }
+   721→          qs.getCell(`B${rowNum}`).font = { size: 9, name: 'Calibri' }
+   722→          rowNum++
+   723→        }
+   724→
+   725→        srNo++
+   726→      })
+   727→
+   728→      // Empty row after section
+   729→      rowNum++
+   730→    }
+   731→
+   732→    // Write LIVING ROOM section
+   733→    if (validatedData.clientInfo.serviceType === 'Full Interior') {
+   734→      writeSection('LIVING ROOM ', livingRoomItems)
+   735→    }
+   736→
+   737→    // Write KITCHEN section
+   738→    writeSection('KITCHEN', kitchenItems)
+   739→
+   740→    // MISCELLANEOUS section
+   741→    const MISC_RATES: Record<string, Record<string, number>> = {
+   742→      ceilingMaterial: { Gypsum: 105, Acrylic: 160, ACP: 180, Armstrong: 115, Glass: 350, PVC: 125 },
+   743→      lightPoint: { 'Primary Light Point': 750, 'Secondary Light Point': 450, 'Half Plug Point': 400, 'Full Plug Point': 700, 'Concealed Light Fitting': 150, 'Fan Fitting': 150 },
+   744→      paint: { 'Luster Paint': 38, 'Texture Paint': 115, 'Plastic Paint': 33, 'Distemper Paint': 27 },
+   745→    }
+   746→    const misc = validatedData.miscEstimate
+   747→    let miscTotal = 0
+   748→    const miscExportItems: Array<{ label: string; qty?: string; amount: number }> = []
+   749→
+   750→    if (misc) {
+   751→      // False Ceiling
+   752→      const fc = misc.falseCeiling || {}
+   753→      if (fc.height && fc.width && fc.material) {
+   754→        const sqft = (parseFloat(fc.height) * parseFloat(fc.width)) / 92903
+   755→        const rate = MISC_RATES.ceilingMaterial[fc.material] || 0
+   756→        const amt = Math.round(sqft * rate)
+   757→        if (amt > 0) {
+   758→          miscExportItems.push({
+   759→            label: `False Ceiling (${fc.type || fc.material})`,
+   760→            qty: Math.round(sqft) + ' sqft',
+   761→            amount: amt,
+   762→          })
+   763→          miscTotal += amt
+   764→        }
+   765→      }
+   766→      // Electrical Work (array)
+   767→      const ewItems = Array.isArray(misc.electricalWork) ? misc.electricalWork : []
+   768→      ewItems.forEach((ew: any) => {
+   769→        if (ew.lightPointType && ew.quantity) {
+   770→          const rate = MISC_RATES.lightPoint[ew.lightPointType] || 0
+   771→          const qty = parseFloat(ew.quantity) || 0
+   772→          const amt = Math.round(rate * qty)
+   773→          if (amt > 0) {
+   774→            miscExportItems.push({
+   775→              label: `Electrical - ${ew.lightPointType}`,
+   776→              qty: qty + ' nos',
+   777→              amount: amt,
+   778→            })
+   779→            miscTotal += amt
+   780→          }
+   781→        }
+   782→      })
+   783→      // Painting (array)
+   784→      const ptItems = Array.isArray(misc.painting) ? misc.painting : []
+   785→      ptItems.forEach((pt: any) => {
+   786→        if (pt.paintType && pt.totalArea) {
+   787→          const rate = MISC_RATES.paint[pt.paintType] || 0
+   788→          const area = parseFloat(pt.totalArea) || 0
+   789→          const amt = Math.round(rate * area)
+   790→          if (amt > 0) {
+   791→            miscExportItems.push({
+   792→              label: `Painting - ${pt.paintType}`,
+   793→              qty: area + ' sqft',
+   794→              amount: amt,
+   795→            })
+   796→            miscTotal += amt
+   797→          }
+   798→        }
+   799→      })
+   800→    }
+   801→
+   802→    if (miscExportItems.length > 0) {
+   803→      qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   804→      qs.getCell(`B${rowNum}`).value = 'MISCELLANEOUS'
+   805→      qs.getCell(`B${rowNum}`).font = { bold: true, size: 12, name: 'Calibri' }
+   806→      rowNum++
+   807→
+   808→      miscExportItems.forEach((item) => {
+   809→        qs.getCell(`A${rowNum}`).value = `${srNo}]`
+   810→        qs.getCell(`A${rowNum}`).font = { name: 'Calibri' }
+   811→
+   812→        qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   813→        qs.getCell(`B${rowNum}`).value = item.label.toUpperCase()
+   814→        qs.getCell(`B${rowNum}`).font = { name: 'Calibri' }
+   815→
+   816→        qs.getCell(`D${rowNum}`).value = item.amount
+   817→        qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   818→        qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   819→        qs.getCell(`D${rowNum}`).font = { name: 'Calibri' }
+   820→
+   821→        srNo++
+   822→        rowNum++
+   823→      })
+   824→
+   825→      rowNum++
+   826→    }
+   827→
+   828→    // SUB TOTAL
+   829→    const subTotal = Math.round(totalAmount + miscTotal)
+   830→    qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   831→    qs.getCell(`B${rowNum}`).value = 'SUB TOTAL'
+   832→    qs.getCell(`B${rowNum}`).font = { bold: true, size: 12, name: 'Calibri' }
+   833→    qs.getCell(`D${rowNum}`).value = subTotal
+   834→    qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   835→    qs.getCell(`D${rowNum}`).font = { bold: true, size: 12, name: 'Calibri' }
+   836→    qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   837→    rowNum++
+   838→
+   839→    // DISCOUNT (if any)
+   840→    const discountPct = validatedData.discountPercent || 0
+   841→    if (discountPct > 0) {
+   842→      const discountAmt = Math.round(subTotal * discountPct / 100)
+   843→      qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   844→      qs.getCell(`B${rowNum}`).value = `DISCOUNT OFFERED FLAT ${discountPct}%`
+   845→      qs.getCell(`B${rowNum}`).font = { name: 'Calibri' }
+   846→      qs.getCell(`D${rowNum}`).value = -discountAmt
+   847→      qs.getCell(`D${rowNum}`).numFmt = '"₹"-#,##0'
+   848→      qs.getCell(`D${rowNum}`).font = { name: 'Calibri' }
+   849→      qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   850→      rowNum++
+   851→
+   852→      // AMOUNT POST DISCOUNT
+   853→      const postDiscount = subTotal - discountAmt
+   854→      qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   855→      qs.getCell(`B${rowNum}`).value = 'AMOUNT POST DISCOUNT'
+   856→      qs.getCell(`B${rowNum}`).font = { bold: true, name: 'Calibri' }
+   857→      qs.getCell(`D${rowNum}`).value = postDiscount
+   858→      qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   859→      qs.getCell(`D${rowNum}`).font = { bold: true, name: 'Calibri' }
+   860→      qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   861→      rowNum++
+   862→
+   863→      // GRAND TOTAL (All Inclusive)
+   864→      qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   865→      qs.getCell(`B${rowNum}`).value = 'GRAND TOTAL (All Inclusive)'
+   866→      qs.getCell(`B${rowNum}`).font = { bold: true, size: 13, name: 'Calibri' }
+   867→      qs.getRow(rowNum).fill = {
+   868→        type: 'pattern',
+   869→        pattern: 'solid',
+   870→        fgColor: { argb: 'FFD4E157' }
+   871→      }
+   872→      qs.getCell(`D${rowNum}`).value = postDiscount
+   873→      qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   874→      qs.getCell(`D${rowNum}`).font = { bold: true, size: 13, name: 'Calibri' }
+   875→      qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   876→    } else {
+   877→      // No discount — Grand Total = Sub Total
+   878→      qs.mergeCells(`B${rowNum}:C${rowNum}`)
+   879→      qs.getCell(`B${rowNum}`).value = 'GRAND TOTAL (All Inclusive)'
+   880→      qs.getCell(`B${rowNum}`).font = { bold: true, size: 13, name: 'Calibri' }
+   881→      qs.getRow(rowNum).fill = {
+   882→        type: 'pattern',
+   883→        pattern: 'solid',
+   884→        fgColor: { argb: 'FFD4E157' }
+   885→      }
+   886→      qs.getCell(`D${rowNum}`).value = subTotal
+   887→      qs.getCell(`D${rowNum}`).numFmt = '"₹"#,##0'
+   888→      qs.getCell(`D${rowNum}`).font = { bold: true, size: 13, name: 'Calibri' }
+   889→      qs.getCell(`D${rowNum}`).alignment = { horizontal: 'right' }
+   890→    }
+   891→    rowNum += 2
+   892→
+   893→    // TERMS & CONDITIONS
+   894→    qs.mergeCells(`B${rowNum}:H${rowNum}`)
+   895→    qs.getCell(`B${rowNum}`).value = 'TERMS & CONDITIONS:-'
+   896→    qs.getCell(`B${rowNum}`).font = { bold: true, size: 12, name: 'Calibri' }
+   897→    rowNum++
+   898→
+   899→    const terms = [
+   900→      { no: '1]', text: 'Quotation is valid for One Month.' },
+   901→      { no: '2]', text: 'Any changes in design will be charged extra.' },
+   902→      { no: '3]', text: 'Advance 40% ,40% Pre dispatch stage & 20% Post Handover' },
+   903→      { no: '4]', text: 'Work will be commenced only after the Advance Given.' },
+   904→      { no: '5]', text: 'Hardware Fittings- HETTICH, All Door internal colour is same as External laminate' },
+   905→      { no: '', text: 'Delivery of Goods:- At site' },
+   906→      { no: '6]', text: 'The charges for Labour Unions & Mathadi Kamgar for  unloading upto the Installation will be borne by client.' },
+   907→      { no: '7]', text: 'Plumbing and Electrical fitting charges will be extra.' }
+   908→    ]
+   909→
+   910→    terms.forEach((term) => {
+   911→      qs.mergeCells(`B${rowNum}:H${rowNum}`)
+   912→      qs.getCell(`B${rowNum}`).value = term.no ? `${term.no} ${term.text}` : `     ${term.text}`
+   913→      qs.getCell(`B${rowNum}`).font = { name: 'Calibri', size: 10 }
+   914→      if (term.no) {
+   915→        qs.getCell(`A${rowNum}`).value = term.no
+   916→        qs.getCell(`A${rowNum}`).font = { bold: true, name: 'Calibri', size: 10 }
+   917→        qs.getCell(`B${rowNum}`).value = term.text
+   918→      }
+   919→      rowNum++
+   920→    })
+   921→
+   922→    rowNum++
+   923→    qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   924→    qs.getCell(`B${rowNum}`).value = 'Regards,'
+   925→    qs.getCell(`B${rowNum}`).font = { name: 'Calibri' }
+   926→    rowNum++
+   927→
+   928→    qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   929→    qs.getCell(`B${rowNum}`).value = 'For Pioneer Enterprises'
+   930→    qs.getCell(`B${rowNum}`).font = { bold: true, name: 'Calibri' }
+   931→    rowNum++
+   932→
+   933→    qs.mergeCells(`B${rowNum}:D${rowNum}`)
+   934→    qs.getCell(`B${rowNum}`).value = 'Mr.Milind Padgaonkar'
+   935→    qs.getCell(`B${rowNum}`).font = { name: 'Calibri' }
+   936→
+   937→    // Set column widths for Quotation sheet
+   938→    qs.getColumn('A').width = 10
+   939→    qs.getColumn('B').width = 45
+   940→    qs.getColumn('C').width = 15
+   941→    qs.getColumn('D').width = 20
+   942→    qs.getColumn('E').width = 3
+   943→    qs.getColumn('F').width = 12
+   944→    qs.getColumn('G').width = 12
+   945→    qs.getColumn('H').width = 12
+   946→
+   947→    // ========================================
+   948→    // SHEET 2: Workbook (olive Workbook format)
+   949→    // ========================================
+   950→    const ws = workbook.addWorksheet('Workbook')
+   951→
+   952→    // Client name header
+   953→    ws.mergeCells('B1:I1')
+   954→    ws.getCell('B1').value = validatedData.clientInfo.name || ''
+   955→    ws.getCell('B1').font = { bold: true, size: 14, name: 'Calibri' }
+   956→
+   957→    // Table headers (row 2)
+   958→    const wbHeaderRow = 2
+   959→    ws.getRow(wbHeaderRow).font = { bold: true, name: 'Calibri', size: 10 }
+   960→    ws.getCell(`B${wbHeaderRow}`).value = '' // Component name column
+   961→    ws.getCell(`C${wbHeaderRow}`).value = 'l'
+   962→    ws.getCell(`D${wbHeaderRow}`).value = 'b'
+   963→    ws.getCell(`E${wbHeaderRow}`).value = 'sq.ft'
+   964→    ws.getCell(`F${wbHeaderRow}`).value = 'Quantity'
+   965→    ws.getCell(`G${wbHeaderRow}`).value = 'Total quantity Sq.Ft'
+   966→    ws.getCell(`H${wbHeaderRow}`).value = 'Rate'
+   967→    ws.getCell(`I${wbHeaderRow}`).value = 'Amount'
+   968→
+   969→    let wbRow = 3
+   970→
+   971→    // Helper to write workbook section
+   972→    const writeWorkbookSection = (sectionName: string, items: ExportItem[]) => {
+   973→      if (items.length === 0) return
+   974→
+   975→      // Section header
+   976→      ws.mergeCells(`B${wbRow}:I${wbRow}`)
+   977→      ws.getCell(`B${wbRow}`).value = sectionName
+   978→      ws.getCell(`B${wbRow}`).font = { bold: true, size: 12, name: 'Calibri' }
+   979→      wbRow++
+   980→
+   981→      items.forEach((item) => {
+   982→        // Component name row
+   983→        if (item.label) {
+   984→          ws.mergeCells(`B${wbRow}:I${wbRow}`)
+   985→          ws.getCell(`B${wbRow}`).value = item.label
+   986→          ws.getCell(`B${wbRow}`).font = { bold: true, name: 'Calibri' }
+   987→          wbRow++
+   988→        }
+   989→
+   990→        // Sub-label
+   991→        if (item.subLabel) {
+   992→          ws.getCell(`B${wbRow}`).value = item.subLabel
+   993→          ws.getCell(`B${wbRow}`).font = { name: 'Calibri', size: 10 }
+   994→        }
+   995→
+   996→        // l
+   997→        ws.getCell(`C${wbRow}`).value = item.l || ''
+   998→        ws.getCell(`C${wbRow}`).font = { name: 'Calibri' }
+   999→
+  1000→        // b
+  1001→        ws.getCell(`D${wbRow}`).value = item.b || ''
+  1002→        ws.getCell(`D${wbRow}`).font = { name: 'Calibri' }
+  1003→
+  1004→        // sq.ft
+  1005→        ws.getCell(`E${wbRow}`).value = item.sqft ? Math.round(item.sqft) : ''
+  1006→        ws.getCell(`E${wbRow}`).font = { name: 'Calibri' }
+  1007→
+  1008→        // Quantity
+  1009→        ws.getCell(`F${wbRow}`).value = item.quantity || 1
+  1010→        ws.getCell(`F${wbRow}`).font = { name: 'Calibri' }
+  1011→
+  1012→        // Total quantity Sq.Ft
+  1013→        const totalQtySqft = item.sqft ? (item.sqft * (item.quantity || 1)) : (item.quantity || 0)
+  1014→        ws.getCell(`G${wbRow}`).value = totalQtySqft > 0 ? Math.round(totalQtySqft) : ''
+  1015→        ws.getCell(`G${wbRow}`).font = { name: 'Calibri' }
+  1016→
+  1017→        // Rate
+  1018→        ws.getCell(`H${wbRow}`).value = item.rate || ''
+  1019→        ws.getCell(`H${wbRow}`).font = { name: 'Calibri' }
+  1020→
+  1021→        // Amount
+  1022→        ws.getCell(`I${wbRow}`).value = Math.round(item.amount)
+  1023→        ws.getCell(`I${wbRow}`).numFmt = '"₹"#,##0'
+  1024→        ws.getCell(`I${wbRow}`).font = { name: 'Calibri' }
+  1025→        wbRow++
+  1026→
+  1027→        // 5% row (margin)
+  1028→        if (item.amount > 0) {
+  1029→          ws.mergeCells(`B${wbRow}:H${wbRow}`)
+  1030→          ws.getCell(`I${wbRow}`).value = Math.round(item.amount * 0.05)
+  1031→          ws.getCell(`I${wbRow}`).numFmt = '"₹"#,##0'
+  1032→          ws.getCell(`I${wbRow}`).font = { name: 'Calibri', size: 9, color: { argb: 'FF888888' } }
+  1033→          wbRow++
+  1034→        }
+  1035→      })
+  1036→
+  1037→      // Section subtotal
+  1038→      if (items.length > 0) {
+  1039→        const sectionTotal = Math.round(items.reduce((sum, item) => sum + item.amount, 0))
+  1040→        ws.mergeCells(`B${wbRow}:H${wbRow}`)
+  1041→        ws.getCell(`I${wbRow}`).value = sectionTotal
+  1042→        ws.getCell(`I${wbRow}`).numFmt = '"₹"#,##0'
+  1043→        ws.getCell(`I${wbRow}`).font = { bold: true, name: 'Calibri' }
+  1044→        wbRow++
+  1045→      }
+  1046→
+  1047→      wbRow++ // Empty row after section
+  1048→    }
+  1049→
+  1050→    // Write sections
+  1051→    if (validatedData.clientInfo.serviceType === 'Full Interior') {
+  1052→      writeWorkbookSection('LIVING', livingRoomItems)
+  1053→    }
+  1054→    writeWorkbookSection('KITCHEN', kitchenItems)
+  1055→
+  1056→    // Set column widths for Workbook sheet
+  1057→    ws.getColumn('A').width = 2
+  1058→    ws.getColumn('B').width = 35
+  1059→    ws.getColumn('C').width = 8
+  1060→    ws.getColumn('D').width = 8
+  1061→    ws.getColumn('E').width = 10
+  1062→    ws.getColumn('F').width = 10
+  1063→    ws.getColumn('G').width = 20
+  1064→    ws.getColumn('H').width = 10
+  1065→    ws.getColumn('I').width = 15
+  1066→
+  1067→    // Generate buffer
+  1068→    const buffer = await workbook.xlsx.writeBuffer()
+  1069→
+  1070→    return new NextResponse(buffer, {
+  1071→      headers: {
+  1072→        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  1073→        'Content-Disposition': `attachment; filename="estimate_${validatedData.clientInfo.name || 'client'}.xlsx"`
+  1074→      }
+  1075→    })
+  1076→  } catch (error) {
+  1077→    console.error('Excel export error:', error)
+  1078→    return NextResponse.json(
+  1079→      { error: 'Failed to generate Excel file' },
+  1080→      { status: 500 }
+  1081→    )
+  1082→  }
+  1083→}
+  1084→

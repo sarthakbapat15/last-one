@@ -405,3 +405,21 @@ Stage Summary:
 - All tables created and verified on Turso cloud
 - src/lib/db.ts uses intelligent routing: local SQLite in dev, Turso in production
 - To deploy: set DATABASE_URL and TURSO_AUTH_TOKEN in Vercel Environment Variables
+---
+Task ID: 3
+Agent: Main
+Task: Fix Excel export missing Living Room, Bedroom, and Custom Components sections
+
+Work Log:
+- Investigated Excel export route.ts: found only Kitchen and Living Room items were exported, no Bedroom/Custom support
+- Found bug: validatedData was referenced inside getKitchenItems() but was out of scope
+- Updated EstimateData interface: added bedroomsEstimate, bedroomCost, bedroomCustomComponents, kitchenCustomComponents, livingRoomCustomComponents, postformingRate
+- Created getBedroomItems() function handling all 7 bedroom components (Wardrobe, Loft, Window Seat, Study Table, Dresser Unit, Bed, Head Board)
+- Created getCustomItems() function for custom components
+- Fixed postforming scoping bug: passed postformingRate parameter to getKitchenItems
+- Tested with comprehensive payload - all sections appear in both Quotation and Workbook sheets
+
+Stage Summary:
+- Excel export now includes ALL sections: Kitchen, Living Room, Master/Guest/Kids Bedrooms, Miscellaneous
+- Custom components from all sections appear in export
+- Postforming rate bug fixed
