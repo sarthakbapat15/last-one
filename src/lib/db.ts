@@ -1,26 +1,28 @@
 import { PrismaClient } from '@prisma/client'
-import { PrismaLibSql } from '@prisma/adapter-libsql'
+import { PrismaLibSQL } from '@prisma/adapter-libsql'
+import { createClient } from '@libsql/client'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
-let _db: PrismaClient | undefined
-
 export function getDb(): PrismaClient {
   if (globalForPrisma.prisma) return globalForPrisma.prisma
 
-  const dbUrl = process.env.DATABASE_URL || ''
+  // Use a dedicated variable for Turso to prevent Prisma schema validation crashes
+  const tursoUrl = process.env.TURSO_DATABASE_URL
 
-  // If DATABASE_URL points to Turso (libsql://), use the adapter
-  if (dbUrl.startsWith('libsql://')) {
-    const adapter = new PrismaLibSql({
-      url: dbUrl,
+  // If TURSO_DATABASE_URL is provided, use the Turso libSQL adapter
+  if (tursoUrl && (tursoUrl.startsWith('libsql://') || tursoUrl.startsWith('https://'))) {
+    const libsql = createClient({
+      url: tursoUrl,
       authToken: process.env.TURSO_AUTH_TOKEN,
     })
+    
+    const adapter = new PrismaLibSQL(libsql)
     globalForPrisma.prisma = new PrismaClient({ adapter, log: ['error'] })
   } else {
-    // Local SQLite file
+    // Local SQLite file fallback
     globalForPrisma.prisma = new PrismaClient({ log: ['query'] })
   }
 
