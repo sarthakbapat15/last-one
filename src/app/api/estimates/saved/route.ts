@@ -1,6 +1,8 @@
 import { db } from '@/lib/db'
 import { NextRequest, NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 // GET — list all saved estimates (newest first)
 export async function GET() {
   try {
@@ -15,6 +17,7 @@ export async function GET() {
         updatedAt: true,
       },
     })
+
     return NextResponse.json(estimates)
   } catch (error) {
     console.error('Failed to list saved estimates:', error)
@@ -36,8 +39,8 @@ export async function POST(request: NextRequest) {
       data: {
         clientName: clientName.trim(),
         label: (label || 'Untitled').trim(),
-        data: JSON.stringify(data),
-        totalCost: Math.round(totalCost) || 0,
+        data: JSON.stringify(data ?? {}),
+        totalCost: Math.round(Number(totalCost) || 0),
       },
     })
 
