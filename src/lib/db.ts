@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client'
-import { PrismaLibSQL } from '@prisma/adapter-libsql'
+import { PrismaLibSql } from '@prisma/adapter-libsql'
 import { createClient } from '@libsql/client'
 
 const globalForPrisma = globalThis as unknown as {
@@ -19,7 +19,7 @@ export function getDb(): PrismaClient {
       authToken: process.env.TURSO_AUTH_TOKEN,
     })
     
-    const adapter = new PrismaLibSQL(libsql)
+    const adapter = new PrismaLibSql(libsql)
     globalForPrisma.prisma = new PrismaClient({ adapter, log: ['error'] })
   } else {
     // Local SQLite file fallback
